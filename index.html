@@ -117,6 +117,14 @@ dialog .actions{display:flex;justify-content:flex-end;gap:.6rem;margin-top:1.25r
 .toast{background:var(--ink);color:var(--bg);padding:.7rem 1rem;border-radius:var(--radius);box-shadow:0 4px 14px rgba(0,0,0,.25)}
 .toast.error{background:var(--danger);color:#fff}
 @media (prefers-reduced-motion:no-preference){.toast{animation:pop .15s ease-out}@keyframes pop{from{transform:translateY(6px);opacity:0}}}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1rem;margin-bottom:1rem}
+.kpi{display:grid;gap:.15rem}
+.kpi strong{font-size:1.75rem;line-height:1.2;letter-spacing:-.01em}
+.bars{list-style:none;margin:0;padding:0;display:grid;gap:.75rem}
+.bars li{display:grid;grid-template-columns:80px 1fr 32px;align-items:center;gap:.6rem}
+.bars li span:last-child{text-align:right;font-weight:600}
+.bar{height:10px;background:var(--neutral-bg);border-radius:999px;overflow:hidden}
+.bar i{display:block;height:100%;background:currentColor;border-radius:999px}
 </style>
 </head>
 <body>
@@ -232,6 +240,15 @@ function seed() {
 }
 
 /* ---------- pseudo API ---------- */
+function filterProducts(f) {
+  const q = (f.q || '').toLowerCase();
+  return db.products.filter(p =>
+    (!q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)) &&
+    (!f.category || p.category === f.category) &&
+    (!f.status || (f.status === 'active') === p.active) &&
+    (!f.stock || (f.stock === 'out' ? p.stock === 0 : f.stock === 'low' ? p.stock > 0 && p.stock <= LOW_STOCK : p.stock > LOW_STOCK))
+  ).sort((a, b) => a.name.localeCompare(b.name));
+}
 class ApiError extends Error { constructor(message, fields = {}, status = 400) { super(message); this.fields = fields; this.status = status; } }
 const currentUser = () => (session && db.users.find(u => u.id === session.userId && u.active)) || null;
 const can = p => { const u = currentUser(); return !!u && PERMS[p].includes(u.role); };
@@ -312,19 +329,22 @@ const api = {
     if (!u.active) throw new ApiError('This account has been disabled. Contact an administrator.', {}, 403);
     session = { userId: u.id }; persistSession();
   }),
+  dashboard: () => call(() => {
+    auth();
+    const orders = db.orders.map(outOrder), live = orders.filter(o => o.status !== 'cancelled');
+    const revenue = round2(live.reduce((sum, o) => sum + o.total, 0));
+    return {
+      revenue, countedOrders: live.length, avgOrder: live.length ? round2(revenue / live.length) : 0,
+      openOrders: orders.filter(o => OPEN_STATUSES.includes(o.status)).length,
+      byStatus: Object.fromEntries(ORDER_STATUSES.map(st => [st, orders.filter(o => o.status === st).length])),
+      lowStock: db.products.filter(p => p.active && p.stock <= LOW_STOCK).sort((a, b) => a.stock - b.stock || a.name.localeCompare(b.name)),
+      recent: [...orders].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 5),
+    };
+  }),
   products: {
-    list: f => call(() => {
-      auth();
-      const q = (f.q || '').toLowerCase();
-      const rows = db.products.filter(p =>
-        (!q || p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q)) &&
-        (!f.category || p.category === f.category) &&
-        (!f.status || (f.status === 'active') === p.active) &&
-        (!f.stock || (f.stock === 'out' ? p.stock === 0 : f.stock === 'low' ? p.stock > 0 && p.stock <= LOW_STOCK : p.stock > LOW_STOCK))
-      ).sort((a, b) => a.name.localeCompare(b.name));
-      return paginate(rows, f.page);
-    }),
+    list: f => call(() => { auth(); return paginate(filterProducts(f), f.page); }),
     all: () => call(() => { auth(); return [...db.products].sort((a, b) => a.name.localeCompare(b.name)); }),
+    exportAll: f => call(() => { auth(); return filterProducts(f); }),
     get: id => call(() => { auth(); return find(db.products, id, 'Product'); }),
     create: d => call(() => {
       need('products:write');
@@ -415,6 +435,16 @@ function confirmDialog({ title, message, confirmText = 'Confirm' }) {
   });
 }
 const loading = () => '<p class="muted" role="status" data-testid="loading">Loading…</p>';
+function csvEscape(v) { const s = String(v ?? ''); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; }
+function downloadCsv(filename, header, rows) {
+  const lines = [header.map(csvEscape).join(','), ...rows.map(r => r.map(csvEscape).join(','))];
+  const blob = new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.setAttribute('data-testid', 'csv-download-link'); document.body.appendChild(a);
+  a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 const opts = (list, val) => list.map(([v, l]) => `<option value="${esc(v)}"${String(v) === String(val) ? ' selected' : ''}>${esc(l)}</option>`).join('');
 const field = (label, name, control, hint = '') =>
   `<div class="field"><label for="${name}">${label}</label>${control}${hint ? `<p class="hint">${hint}</p>` : ''}<p class="field-error" data-testid="error-${name}" data-for="${name}" hidden></p></div>`;
@@ -447,6 +477,7 @@ function render(active, html) {
   <header class="topbar">
     <a class="brand" href="#/products">ShopDesk</a>
     <nav aria-label="Main">
+      <a href="#/dashboard" data-testid="nav-dashboard"${cur('dashboard')}>Dashboard</a>
       <a href="#/products" data-testid="nav-products"${cur('products')}>Products</a>
       <a href="#/orders" data-testid="nav-orders"${cur('orders')}>Orders</a>
       ${can('users:read') ? `<a href="#/users" data-testid="nav-users"${cur('users')}>Users</a>` : ''}
@@ -513,12 +544,42 @@ function loginPage(ctx, params) {
   });
 }
 
+/* ---------- pages: dashboard ---------- */
+async function dashboardPage(ctx) {
+  render('dashboard', `<div class="page-head"><h1>Dashboard</h1></div><div id="content">${loading()}</div>`);
+  try {
+    const d = await api.dashboard(); if (ctx.stale()) return;
+    const max = Math.max(1, ...ORDER_STATUSES.map(st => d.byStatus[st]));
+    content(`
+      <div class="kpis" data-testid="kpis">
+        <div class="card kpi"><span class="muted">Revenue</span><strong data-testid="kpi-revenue">${money(d.revenue)}</strong><span class="hint">Excludes cancelled orders</span></div>
+        <div class="card kpi"><span class="muted">Open orders</span><strong data-testid="kpi-open-orders">${d.openOrders}</strong><span class="hint">Pending, paid or shipped</span></div>
+        <div class="card kpi"><span class="muted">Average order value</span><strong data-testid="kpi-avg-order">${money(d.avgOrder)}</strong><span class="hint">Across ${d.countedOrders} orders</span></div>
+        <div class="card kpi"><span class="muted">Needs restocking</span><strong data-testid="kpi-low-stock">${d.lowStock.length}</strong><span class="hint">Active products with ${LOW_STOCK} units or fewer</span></div>
+      </div>
+      <div class="grid2">
+        <div class="stack">
+          <div class="card"><h2>Recent orders</h2><div class="table-wrap"><table data-testid="recent-orders-table"><thead><tr><th>Order</th><th>Customer</th><th class="num">Total</th><th>Status</th></tr></thead><tbody>
+            ${d.recent.map(o => `<tr data-testid="recent-order-row"><td><a href="#/orders/${o.id}" data-testid="recent-order-number">${o.orderNo}</a></td><td>${esc(o.customerName)}</td><td class="num">${money(o.total)}</td><td>${statusBadge(o.status)}</td></tr>`).join('')}
+          </tbody></table></div></div>
+          <div class="card"><h2>Needs restocking</h2>${d.lowStock.length ? `<div class="table-wrap"><table data-testid="restock-table"><thead><tr><th>Product</th><th>SKU</th><th class="num">Stock</th><th></th></tr></thead><tbody>
+            ${d.lowStock.map(p => `<tr data-testid="restock-row"><td><a href="#/products/${p.id}" data-testid="restock-name">${esc(p.name)}</a></td><td>${esc(p.sku)}</td><td class="num" data-testid="restock-stock">${p.stock}</td><td>${stockBadge(p.stock)}</td></tr>`).join('')}
+          </tbody></table></div>` : '<p class="muted" data-testid="restock-empty">Every active product is well stocked.</p>'}</div>
+        </div>
+        <div class="card"><h2>Orders by status</h2><ul class="bars" data-testid="status-bars">
+          ${ORDER_STATUSES.map(st => `<li data-testid="status-bar" data-status="${st}"><span>${cap(st)}</span><span class="bar"><i class="st-${st}" style="width:${d.byStatus[st] / max * 100}%"></i></span><span data-testid="status-count">${d.byStatus[st]}</span></li>`).join('')}
+        </ul></div>
+      </div>`);
+  } catch (e) { showError(e, ctx); }
+}
+
 /* ---------- pages: products ---------- */
 async function productsPage(ctx, params) {
   const f = { q: params.get('q') || '', category: params.get('category') || '', status: params.get('status') || '', stock: params.get('stock') || '', page: Math.max(1, +params.get('page') || 1) };
   render('products', `
-    <div class="page-head"><h1>Products</h1>
-      ${can('products:write') ? '<a class="btn primary" href="#/products/new" data-testid="create-product-button">Create product</a>' : ''}</div>
+    <div class="page-head"><h1>Products</h1><div class="inline">
+      <button type="button" class="btn" id="export-csv" data-testid="export-csv-button">Export CSV</button>
+      ${can('products:write') ? '<a class="btn primary" href="#/products/new" data-testid="create-product-button">Create product</a>' : ''}</div></div>
     <form class="filters" id="filters" role="search" data-testid="product-filters">
       <input type="search" id="f-q" placeholder="Search by name or SKU" aria-label="Search products" data-testid="product-search" value="${esc(f.q)}">
       <select id="f-category" aria-label="Category" data-testid="filter-category"><option value="">All categories</option>${opts(CATEGORIES.map(c => [c, c]), f.category)}</select>
@@ -556,6 +617,17 @@ async function productsPage(ctx, params) {
   q.addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => { f.q = q.value.trim(); f.page = 1; sync(); }, 250); });
   ['category', 'stock', 'status'].forEach(k => $('#f-' + k).addEventListener('change', e => { f[k] = e.target.value; f.page = 1; sync(); }));
   $('#f-clear').onclick = () => { Object.assign(f, { q: '', category: '', stock: '', status: '', page: 1 }); q.value = ''; ['category', 'stock', 'status'].forEach(k => { $('#f-' + k).value = ''; }); sync(); };
+  $('#export-csv').onclick = async () => {
+    const btn = $('#export-csv'), label = btn.textContent; btn.disabled = true; btn.textContent = 'Exporting…';
+    try {
+      const rows = await api.products.exportAll(f);
+      if (!rows.length) { toast('No products match the current filters', 'error'); return; }
+      downloadCsv(`shopdesk-products-${new Date().toISOString().slice(0, 10)}.csv`,
+        ['SKU', 'Name', 'Category', 'Price', 'Stock', 'Status', 'Description'],
+        rows.map(p => [p.sku, p.name, p.category, p.price, p.stock, p.active ? 'Active' : 'Inactive', p.description]));
+      toast(`Exported ${rows.length} product${rows.length === 1 ? '' : 's'}`);
+    } catch (e) { toast(e.message, 'error'); } finally { btn.disabled = false; btn.textContent = label; }
+  };
   results.addEventListener('click', async e => {
     const pg = e.target.closest('[data-page]');
     if (pg && !pg.disabled) { f.page = +pg.dataset.page; return sync(); }
@@ -852,6 +924,7 @@ async function router() {
   if (!user) return go('/login' + (path !== '/' ? '?next=' + encodeURIComponent(raw) : ''));
   let m;
   if (path === '/') return go('/products');
+  if (path === '/dashboard') return dashboardPage(ctx);
   if (path === '/products') return productsPage(ctx, params);
   if (path === '/products/new') return productForm(ctx, null);
   if ((m = path.match(/^\/products\/(\d+)$/))) return productDetail(ctx, +m[1]);
