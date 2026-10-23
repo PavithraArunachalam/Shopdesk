@@ -125,6 +125,21 @@ dialog .actions{display:flex;justify-content:flex-end;gap:.6rem;margin-top:1.25r
 .bars li span:last-child{text-align:right;font-weight:600}
 .bar{height:10px;background:var(--neutral-bg);border-radius:999px;overflow:hidden}
 .bar i{display:block;height:100%;background:currentColor;border-radius:999px}
+.invoice-wrap{max-width:720px;margin:0 auto}
+.invoice-head{display:flex;justify-content:space-between;align-items:flex-start;gap:1.5rem;margin-bottom:1.5rem;flex-wrap:wrap}
+.invoice-brand{font-weight:700;font-size:1.3rem;letter-spacing:-.01em}
+.invoice-meta{text-align:right;font-size:.9rem;color:var(--muted)}
+.invoice-meta strong{display:block;color:var(--ink);font-size:1.05rem}
+.invoice-parties{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;margin-bottom:1.5rem}
+.invoice-parties h3{margin:0 0 .3rem;font-size:.8rem;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600}
+.invoice-actions{display:flex;gap:.6rem;justify-content:flex-end;margin-bottom:1rem}
+@media print{
+  .no-print{display:none!important}
+  body{background:#fff;color:#111}
+  .invoice-wrap{max-width:none;margin:0}
+  .card,table{box-shadow:none!important}
+  a{color:inherit;text-decoration:none}
+}
 </style>
 </head>
 <body>
@@ -754,7 +769,10 @@ async function orderDetail(ctx, id) {
       document.title = `${o.orderNo} — ShopDesk`;
       const nexts = NEXT[o.status], writable = can('orders:write');
       content(`<div class="page-head"><div class="inline"><h1 data-testid="order-title">${o.orderNo}</h1>${statusBadge(o.status)}</div>
-          ${writable && o.status === 'pending' ? `<a class="btn" href="#/orders/${o.id}/edit" data-testid="edit-order-button">Edit order</a>` : ''}</div>
+          <div class="inline">
+            <a class="btn" href="#/orders/${o.id}/invoice" data-testid="print-invoice-button">Print invoice</a>
+            ${writable && o.status === 'pending' ? `<a class="btn" href="#/orders/${o.id}/edit" data-testid="edit-order-button">Edit order</a>` : ''}
+          </div></div>
         <div class="grid2"><div class="stack">
           <div class="card"><h2>Items</h2><div class="table-wrap"><table data-testid="order-items-table"><thead><tr><th>Product</th><th>SKU</th><th class="num">Unit price</th><th class="num">Qty</th><th class="num">Subtotal</th></tr></thead><tbody>
             ${o.items.map(i => `<tr data-testid="order-item"><td data-testid="item-name">${esc(i.name)}</td><td>${esc(i.sku)}</td><td class="num">${money(i.unitPrice)}</td><td class="num" data-testid="item-qty">${i.qty}</td><td class="num">${money(i.unitPrice * i.qty)}</td></tr>`).join('')}
@@ -783,6 +801,48 @@ async function orderDetail(ctx, id) {
     } catch (e) { showError(e, ctx); }
   };
   draw();
+}
+
+/* A deliberately bare page (no app chrome) so the browser's print output is just the invoice. */
+async function invoicePage(ctx, id) {
+  app.innerHTML = `<div id="content" class="invoice-wrap">${loading()}</div>`;
+  try {
+    const o = await api.orders.get(id); if (ctx.stale()) return;
+    document.title = `Invoice ${o.orderNo} — ShopDesk`;
+    $('#content').innerHTML = `
+      <div class="invoice-actions no-print">
+        <a class="btn" href="#/orders/${o.id}" data-testid="back-to-order">← Back to order</a>
+        <button type="button" class="btn primary" id="print-now" data-testid="print-now-button">Print</button>
+      </div>
+      <div class="card">
+        <div class="invoice-head">
+          <div><div class="invoice-brand">ShopDesk</div><p class="muted">Back-office demo invoice</p></div>
+          <div class="invoice-meta">
+            <strong data-testid="invoice-number">Invoice ${o.orderNo}</strong>
+            <span data-testid="invoice-date">Issued ${fmtDate(o.createdAt)}</span><br>
+            ${statusBadge(o.status)}
+          </div>
+        </div>
+        <div class="invoice-parties">
+          <div><h3>Billed to</h3>
+            <div data-testid="invoice-customer-name">${esc(o.customerName)}</div>
+            <div class="muted" data-testid="invoice-customer-email">${esc(o.customerEmail)}</div>
+          </div>
+          <div><h3>Order</h3>
+            <div data-testid="invoice-order-number">${o.orderNo}</div>
+            <div class="muted">${o.items.reduce((n, i) => n + i.qty, 0)} item${o.items.reduce((n, i) => n + i.qty, 0) === 1 ? '' : 's'}</div>
+          </div>
+        </div>
+        <div class="table-wrap"><table data-testid="invoice-items-table"><thead><tr><th>Product</th><th>SKU</th><th class="num">Unit price</th><th class="num">Qty</th><th class="num">Subtotal</th></tr></thead><tbody>
+          ${o.items.map(i => `<tr data-testid="invoice-item"><td>${esc(i.name)}</td><td>${esc(i.sku)}</td><td class="num">${money(i.unitPrice)}</td><td class="num">${i.qty}</td><td class="num">${money(i.unitPrice * i.qty)}</td></tr>`).join('')}
+        </tbody></table><div class="total-row"><span>Total due</span><span data-testid="invoice-total">${money(o.total)}</span></div></div>
+        ${o.notes ? `<p class="hint" data-testid="invoice-notes"><strong>Notes:</strong> ${esc(o.notes)}</p>` : ''}
+      </div>`;
+    $('#print-now').onclick = () => window.print();
+  } catch (e) {
+    if (ctx.stale()) return;
+    $('#content').innerHTML = `<div class="empty" data-testid="not-found" role="alert"><h2>Not found</h2><p>${esc(e.message)}</p><a class="btn no-print" href="#/orders">Back to orders</a></div>`;
+  }
 }
 
 async function orderForm(ctx, id) {
@@ -931,6 +991,7 @@ async function router() {
   if ((m = path.match(/^\/products\/(\d+)\/edit$/))) return productForm(ctx, +m[1]);
   if (path === '/orders') return ordersPage(ctx, params);
   if (path === '/orders/new') return orderForm(ctx, null);
+  if ((m = path.match(/^\/orders\/(\d+)\/invoice$/))) return invoicePage(ctx, +m[1]);
   if ((m = path.match(/^\/orders\/(\d+)$/))) return orderDetail(ctx, +m[1]);
   if ((m = path.match(/^\/orders\/(\d+)\/edit$/))) return orderForm(ctx, +m[1]);
   if (path === '/users') return usersPage(ctx);
